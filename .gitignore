@@ -24,3 +24,22 @@ go.work.sum
 # env file
 .env
 phase-*.md
+certs
+# IDE specific files
+.idea/
+# Local configuration files
+*.local
+# Local build artifacts
+*.local.*
+# Local cache files
+.cache/
+# Local log files
+*.log
+# Local temporary files
+*.tmp
+# Local backup files
+*.bak
+# Local history files
+*.history
+#  binary files
+*.bin
