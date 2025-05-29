@@ -10,6 +10,7 @@ import (
 	"github.com/hillu/go-yara/v4"
 	"github.com/smartshieldai-idps/backend/internal/detection/elasticsearch"
 	"github.com/smartshieldai-idps/backend/internal/detection/rules"
+	"github.com/smartshieldai-idps/backend/internal/middleware"
 	"github.com/smartshieldai-idps/backend/internal/models"
 	"github.com/smartshieldai-idps/backend/internal/store"
 )
@@ -37,6 +38,14 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		v1.POST("/data", h.handleDataIngestion)
 		v1.GET("/data", h.handleDataRetrieval)
 		v1.GET("/threats", h.handleThreatRetrieval)
+
+		// Rules management endpoints
+		rules := v1.Group("/rules")
+		{
+			rules.GET("/status", h.getRulesStatus)
+			rules.POST("/update", h.triggerRulesUpdate)
+			rules.GET("/list", h.listRules)
+		}
 	}
 }
 
@@ -165,5 +174,77 @@ func (h *Handler) handleThreatRetrieval(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Threat retrieval endpoint ready",
 		"status": "available",
+	})
+}
+
+// RuleStatusResponse represents the rules status response
+type RuleStatusResponse struct {
+	TotalRules    int                  `json:"totalRules"`
+	LastUpdated   string               `json:"lastUpdated"`
+	RulesByType   map[string]int       `json:"rulesByType"`
+	RuleMetadata  []rules.RuleInfo     `json:"ruleMetadata"`
+}
+
+// getRulesStatus returns the current status of YARA rules
+func (h *Handler) getRulesStatus(c *gin.Context) {
+	ruleInfo := h.rules.GetRuleInfo()
+	
+	// Aggregate rules by type
+	rulesByType := make(map[string]int)
+	for _, rule := range ruleInfo {
+		ruleType := rule.Metadata.Category
+		rulesByType[ruleType]++
+	}
+
+	c.JSON(http.StatusOK, middleware.APIResponse{
+		Status: "success",
+		Data: RuleStatusResponse{
+			TotalRules:   len(ruleInfo),
+			LastUpdated:  h.rules.GetLastUpdated().Format("2006-01-02 15:04:05"),
+			RulesByType:  rulesByType,
+			RuleMetadata: ruleInfo,
+		},
+	})
+}
+
+// triggerRulesUpdate triggers a manual update of YARA rules
+func (h *Handler) triggerRulesUpdate(c *gin.Context) {
+	updated, err := h.rules.CheckForUpdates()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, middleware.APIResponse{
+			Status:  "error",
+			Message: "Failed to check for updates: " + err.Error(),
+		})
+		return
+	}
+
+	if !updated {
+		c.JSON(http.StatusOK, middleware.APIResponse{
+			Status:  "success",
+			Message: "Rules are already up to date",
+		})
+		return
+	}
+
+	if err := h.rules.UpdateRules(); err != nil {
+		c.JSON(http.StatusInternalServerError, middleware.APIResponse{
+			Status:  "error",
+			Message: "Failed to update rules: " + err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, middleware.APIResponse{
+		Status:  "success",
+		Message: "Rules updated successfully",
+	})
+}
+
+// listRules returns a list of all YARA rules
+func (h *Handler) listRules(c *gin.Context) {
+	ruleInfo := h.rules.GetRuleInfo()
+	c.JSON(http.StatusOK, middleware.APIResponse{
+		Status: "success",
+		Data:   ruleInfo,
 	})
 }

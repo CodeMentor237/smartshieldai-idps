@@ -15,7 +15,9 @@ import (
 	"github.com/smartshieldai-idps/backend/config"
 	"github.com/smartshieldai-idps/backend/internal/detection/elasticsearch"
 	"github.com/smartshieldai-idps/backend/internal/detection/rules"
+	"github.com/smartshieldai-idps/backend/internal/middleware"
 	"github.com/smartshieldai-idps/backend/internal/store"
+	"golang.org/x/time/rate"
 )
 
 func main() {
@@ -35,27 +37,21 @@ func main() {
 	defer dataStore.Close()
 
 	// Initialize YARA rules manager
-	rulesManager, err := rules.NewManager()
+	rulesDir := filepath.Join("rules")
+	rulesManager, err := rules.NewManager(rulesDir)
 	if err != nil {
 		log.Fatalf("Failed to initialize YARA rules manager: %v", err)
 	}
 	defer rulesManager.Close()
 
+	// Initialize and start rules update service
+	updateService := rules.NewUpdateService(rulesManager, 1*time.Hour)
+	updateService.Start()
+	defer updateService.Stop()
+
 	// Load YARA rules
-	ruleFiles, err := filepath.Glob(filepath.Join(cfg.YaraRulesPath, "*.yar"))
-	if err != nil {
-		log.Fatalf("Failed to find YARA rules: %v", err)
-	}
-
-	for _, ruleFile := range ruleFiles {
-		if err := rulesManager.AddRuleFile(ruleFile); err != nil {
-			log.Printf("Warning: failed to load rule file %s: %v", ruleFile, err)
-			continue
-		}
-	}
-
-	if err := rulesManager.CompileRules(); err != nil {
-		log.Fatalf("Failed to compile YARA rules: %v", err)
+	if err := rulesManager.UpdateRules(); err != nil {
+		log.Fatalf("Failed to load YARA rules: %v", err)
 	}
 
 	// Initialize Elasticsearch logger
@@ -70,11 +66,22 @@ func main() {
 		log.Println("Threat logging to Elasticsearch will be disabled")
 	}
 
-	// Initialize Gin router
+	// Initialize Gin router with middleware
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
+
+	// Add recovery, logging, and security middleware
 	router.Use(gin.Recovery())
 	router.Use(gin.Logger())
+	router.Use(middleware.SecurityHeaders())
+
+	// Add rate limiting (100 requests per minute with burst of 10)
+	rateLimiter := middleware.NewRateLimiter(rate.Limit(100.0/60.0), 10)
+	router.Use(rateLimiter.RateLimit())
+
+	// Add request validation and timeout
+	router.Use(middleware.ValidateJSON())
+	router.Use(middleware.RequestTimeout(30 * time.Second))
 
 	// Initialize API handlers with all components
 	handler := v1.NewHandler(dataStore, rulesManager, esLogger)
