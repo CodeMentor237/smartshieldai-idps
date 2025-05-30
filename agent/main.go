@@ -18,7 +18,9 @@ import (
 	"time"
 
 	"github.com/smartshieldai-idps/agent/config"
+	"github.com/smartshieldai-idps/agent/pkg/cloud"
 	"github.com/smartshieldai-idps/agent/pkg/endpoint"
+	"github.com/smartshieldai-idps/agent/pkg/logs"
 	"github.com/smartshieldai-idps/agent/pkg/monitoring"
 	"github.com/smartshieldai-idps/agent/pkg/network"
 	"github.com/smartshieldai-idps/agent/pkg/security"
@@ -144,12 +146,20 @@ func main() {
 	}
 
 	// Initialize system monitor
-	systemMonitor, err := system.NewMonitor(&cfg.System)
-	if err != nil {
-		log.Fatalf("Failed to initialize system monitor: %v", err)
-	}
+	systemMonitor := system.NewMonitor(cfg)
 	logChan := make(chan []byte, 1000)
-	go systemMonitor.Start(ctx, logChan)
+	go systemMonitor.Start(ctx)
+
+	// Initialize application log collector
+	log.Println("Initializing application log collector...")
+	appLogCollector, err := logs.NewCollector(&cfg.System, logChan)
+	if err != nil {
+		log.Fatalf("Failed to initialize application log collector: %v", err)
+	}
+	if err := appLogCollector.Start(ctx); err != nil {
+		log.Fatalf("Failed to start application log collector: %v", err)
+	}
+	defer appLogCollector.Stop()
 
 	// Initialize Osquery client and start scheduler
 	osquerySocketPath := cfg.System.OsquerySocketPath
@@ -168,6 +178,26 @@ func main() {
 	if osqueryClient != nil {
 		log.Println("Initializing Osquery data collection...")
 		go osqueryClient.ScheduleQueries(ctx, osqueryChan)
+	}
+
+	// Initialize CloudTrail collector
+	if cfg.Cloud.CloudTrail.Enabled {
+		cloudTrailChan := make(chan []byte, 1000)
+		collector, err := cloud.NewCollector(cfg.Cloud.AWS.Region, cloudTrailChan)
+		if err != nil {
+			log.Fatalf("Failed to initialize CloudTrail collector: %v", err)
+		}
+		go func() {
+			if err := collector.Start(ctx); err != nil {
+				log.Printf("CloudTrail collector error: %v", err)
+			}
+		}()
+		// Forward events to backend
+		go func() {
+			for event := range cloudTrailChan {
+				processLog(ctx, cfg, httpClient, rateLimiter, encryptor, event, metricsCollector, healthChecker)
+			}
+		}()
 	}
 
 	// Start data processing
@@ -195,6 +225,9 @@ func main() {
 				if systemMonitor != nil {
 					log.Printf("System monitoring is active")
 				}
+
+				// Report application log collection status
+				log.Printf("Application log collection is active")
 			}
 		}
 	}()

@@ -29,3 +29,16 @@ data:
       log_paths:
         - /var/log/syslog
         - /var/log/auth.log
+      application_logs:
+        apache:
+          - /var/log/apache2/access.log
+          - /var/log/apache2/error.log
+          - /var/log/httpd/access_log
+          - /var/log/httpd/error_log
+        nginx:
+          - /var/log/nginx/access.log
+          - /var/log/nginx/error.log
+        mysql:
+          - /var/log/mysql/error.log
+          - /var/log/mysql/mysql.log
+          - /var/log/mysqld.log

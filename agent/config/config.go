@@ -9,6 +9,44 @@ import (
 	"time"
 )
 
+// PlatformConfig holds platform-specific configuration
+type PlatformConfig struct {
+	Windows struct {
+		EventLogPaths []string `json:"event_log_paths"`
+		ServiceNames  []string `json:"service_names"`
+		DefaultPaths  []string `json:"default_paths"`
+	} `json:"windows"`
+	Linux struct {
+		SyslogPaths   []string `json:"syslog_paths"`
+		ServiceNames  []string `json:"service_names"`
+		DefaultPaths  []string `json:"default_paths"`
+	} `json:"linux"`
+	Darwin struct {
+		SystemLogPaths []string `json:"system_log_paths"`
+		ServiceNames   []string `json:"service_names"`
+		DefaultPaths   []string `json:"default_paths"`
+	} `json:"darwin"`
+}
+
+// ApplicationLogPaths holds platform-specific application log paths
+type ApplicationLogPaths struct {
+	Windows struct {
+		Apache []string `json:"apache"`
+		Nginx  []string `json:"nginx"`
+		MySQL  []string `json:"mysql"`
+	} `json:"windows"`
+	Linux struct {
+		Apache []string `json:"apache"`
+		Nginx  []string `json:"nginx"`
+		MySQL  []string `json:"mysql"`
+	} `json:"linux"`
+	Darwin struct {
+		Apache []string `json:"apache"`
+		Nginx  []string `json:"nginx"`
+		MySQL  []string `json:"mysql"`
+	} `json:"darwin"`
+}
+
 // Config represents the agent configuration
 type Config struct {
 	AgentID   string         `json:"agent_id"`
@@ -18,6 +56,8 @@ type Config struct {
 	Monitoring MonitoringConfig `json:"monitoring"`
 	Network   NetworkConfig `json:"network"`
 	System    SystemConfig  `json:"system"`
+	Cloud     CloudConfig   `json:"cloud"`
+	Platform  PlatformConfig `json:"platform"`
 }
 
 // BackendConfig represents backend connection settings
@@ -62,6 +102,23 @@ type NetworkConfig struct {
 type SystemConfig struct {
 	LogPaths            []string `json:"log_paths"`
 	OsquerySocketPath   string   `json:"osquery_socket_path"`
+	ApplicationLogs     ApplicationLogPaths `json:"application_logs"`
+}
+
+type CloudConfig struct {
+	AWS struct {
+		Region          string `json:"region"`
+		AccessKeyID     string `json:"access_key_id"`
+		SecretAccessKey string `json:"secret_access_key"`
+		SessionToken    string `json:"session_token,omitempty"`
+		RoleARN         string `json:"role_arn,omitempty"`
+	} `json:"aws"`
+	CloudTrail struct {
+		Enabled      bool     `json:"enabled"`
+		EventTypes   []string `json:"event_types"`
+		MaxResults   int32    `json:"max_results"`
+		PollInterval string   `json:"poll_interval"`
+	} `json:"cloudtrail"`
 }
 
 // DefaultConfig returns the default configuration
@@ -70,6 +127,139 @@ func DefaultConfig() *Config {
 	defaultInterface := "eth0"
 	if runtime.GOOS == "darwin" {
 		defaultInterface = "en0"
+	} else if runtime.GOOS == "windows" {
+		defaultInterface = "Ethernet"
+	}
+
+	// Platform-specific default paths
+	platformConfig := PlatformConfig{}
+	
+	// Windows defaults
+	platformConfig.Windows.EventLogPaths = []string{
+		"C:\\Windows\\System32\\winevt\\Logs\\Security.evtx",
+		"C:\\Windows\\System32\\winevt\\Logs\\System.evtx",
+		"C:\\Windows\\System32\\winevt\\Logs\\Application.evtx",
+	}
+	platformConfig.Windows.ServiceNames = []string{
+		"Apache2.4",
+		"MySQL80",
+		"nginx",
+	}
+	platformConfig.Windows.DefaultPaths = []string{
+		"C:\\Windows\\System32",
+		"C:\\Program Files",
+		"C:\\Program Files (x86)",
+		"C:\\Users",
+	}
+
+	// Linux defaults
+	platformConfig.Linux.SyslogPaths = []string{
+		"/var/log/syslog",
+		"/var/log/auth.log",
+		"/var/log/messages",
+	}
+	platformConfig.Linux.ServiceNames = []string{
+		"apache2",
+		"mysql",
+		"nginx",
+	}
+	platformConfig.Linux.DefaultPaths = []string{
+		"/etc",
+		"/bin",
+		"/sbin",
+		"/usr/bin",
+		"/usr/sbin",
+		"/var/log",
+	}
+
+	// macOS defaults
+	platformConfig.Darwin.SystemLogPaths = []string{
+		"/var/log/system.log",
+		"/var/log/auth.log",
+		"/var/log/install.log",
+	}
+	platformConfig.Darwin.ServiceNames = []string{
+		"org.apache.httpd",
+		"com.mysql.mysqld",
+		"org.nginx.nginx",
+	}
+	platformConfig.Darwin.DefaultPaths = []string{
+		"/etc",
+		"/bin",
+		"/sbin",
+		"/usr/bin",
+		"/usr/sbin",
+		"/var/log",
+		"/Applications",
+	}
+
+	// Application log paths
+	appLogs := ApplicationLogPaths{}
+	
+	// Windows application logs
+	appLogs.Windows.Apache = []string{
+		"C:\\Program Files\\Apache\\logs\\access.log",
+		"C:\\Program Files\\Apache\\logs\\error.log",
+		"C:\\xampp\\apache\\logs\\access.log",
+		"C:\\xampp\\apache\\logs\\error.log",
+	}
+	appLogs.Windows.Nginx = []string{
+		"C:\\Program Files\\nginx\\logs\\access.log",
+		"C:\\Program Files\\nginx\\logs\\error.log",
+	}
+	appLogs.Windows.MySQL = []string{
+		"C:\\Program Files\\MySQL\\Data\\mysql.log",
+		"C:\\xampp\\mysql\\data\\mysql.log",
+	}
+
+	// Linux application logs
+	appLogs.Linux.Apache = []string{
+		"/var/log/apache2/access.log",
+		"/var/log/apache2/error.log",
+		"/var/log/httpd/access_log",
+		"/var/log/httpd/error_log",
+	}
+	appLogs.Linux.Nginx = []string{
+		"/var/log/nginx/access.log",
+		"/var/log/nginx/error.log",
+	}
+	appLogs.Linux.MySQL = []string{
+		"/var/log/mysql/error.log",
+		"/var/log/mysql/mysql.log",
+		"/var/log/mysqld.log",
+	}
+
+	// macOS application logs
+	appLogs.Darwin.Apache = []string{
+		"/var/log/apache2/access.log",
+		"/var/log/apache2/error.log",
+		"/private/var/log/apache2/access.log",
+		"/private/var/log/apache2/error.log",
+	}
+	appLogs.Darwin.Nginx = []string{
+		"/var/log/nginx/access.log",
+		"/var/log/nginx/error.log",
+		"/private/var/log/nginx/access.log",
+		"/private/var/log/nginx/error.log",
+	}
+	appLogs.Darwin.MySQL = []string{
+		"/var/log/mysql/error.log",
+		"/var/log/mysql/mysql.log",
+		"/private/var/log/mysql/error.log",
+		"/private/var/log/mysql/mysql.log",
+	}
+
+	// Get platform-specific log paths
+	var logPaths []string
+	switch runtime.GOOS {
+	case "windows":
+		logPaths = platformConfig.Windows.EventLogPaths
+	case "linux":
+		logPaths = platformConfig.Linux.SyslogPaths
+	case "darwin":
+		logPaths = platformConfig.Darwin.SystemLogPaths
+	default:
+		logPaths = platformConfig.Linux.SyslogPaths // fallback to Linux paths
 	}
 
 	return &Config{
@@ -103,12 +293,11 @@ func DefaultConfig() *Config {
 			GeoIPDBPath:    "GeoLite2-City.mmdb",
 		},
 		System: SystemConfig{
-			LogPaths:            []string{
-				"/var/log/syslog",
-				"/var/log/auth.log",
-			},
+			LogPaths:          logPaths,
 			OsquerySocketPath: "",
+			ApplicationLogs:   appLogs,
 		},
+		Platform: platformConfig,
 	}
 }
 
