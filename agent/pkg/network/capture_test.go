@@ -17,16 +17,18 @@ func TestNewCapture(t *testing.T) {
 		{
 			name: "ValidConfig",
 			config: &config.NetworkConfig{
-				Interface: "eth0",
-				BPFFilter: "",
+				Interfaces:    []string{"eth0"},
+				CaptureFilter: "",
+				MaxPacketSize: 65536,
 			},
 			wantErr: false,
 		},
 		{
-			name: "EmptyInterface",
+			name: "EmptyInterfaces",
 			config: &config.NetworkConfig{
-				Interface: "",
-				BPFFilter: "",
+				Interfaces:    []string{},
+				CaptureFilter: "",
+				MaxPacketSize: 65536,
 			},
 			wantErr: true,
 		},
@@ -44,8 +46,9 @@ func TestNewCapture(t *testing.T) {
 
 func TestCaptureStart(t *testing.T) {
 	config := &config.NetworkConfig{
-		Interface: "eth0",
-		BPFFilter: "",
+		Interfaces:    []string{"eth0"},
+		CaptureFilter: "",
+		MaxPacketSize: 65536,
 	}
 
 	capture, err := NewCapture(config)
@@ -74,8 +77,9 @@ func TestCaptureStart(t *testing.T) {
 
 func TestCaptureStop(t *testing.T) {
 	config := &config.NetworkConfig{
-		Interface: "eth0",
-		BPFFilter: "",
+		Interfaces:    []string{"eth0"},
+		CaptureFilter: "",
+		MaxPacketSize: 65536,
 	}
 
 	capture, err := NewCapture(config)

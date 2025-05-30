@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: smartshield-backend
+  namespace: smartshield
+  labels:
+    app: smartshield-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: smartshield-backend
+  template:
+    metadata:
+      labels:
+        app: smartshield-backend
+      annotations:
+        seccomp.security.alpha.kubernetes.io/pod: runtime/default
+        container.apparmor.security.beta.kubernetes.io/smartshield-backend: runtime/default
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backend
+          image: smartshield/backend:latest
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          env:
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secrets
+                  key: redis-url
+            - name: ELASTICSEARCH_URL
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secrets
+                  key: elasticsearch-url
+            - name: TLS_CERT
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secrets
+                  key: tls-cert
+            - name: TLS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secrets
+                  key: tls-key
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+            - name: rules
+              mountPath: /app/rules
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: backend-config
+        - name: rules
+          configMap:
+            name: yara-rules

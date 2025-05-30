@@ -112,14 +112,18 @@ func DefaultConfig() MonitorConfig {
 
 // NewMonitor creates a new system monitor
 func NewMonitor(cfg *config.SystemConfig) (*Monitor, error) {
-	if len(cfg.LogPaths) == 0 {
-		return nil, fmt.Errorf("at least one log path is required")
-	}
-
 	// Verify log paths exist
 	for _, path := range cfg.LogPaths {
-		if _, err := os.Stat(path); err != nil {
-			return nil, fmt.Errorf("log path %s does not exist: %v", path, err)
+		// Expand environment variables in path
+		expandedPath := os.ExpandEnv(path)
+		
+		// Check if path exists
+		if _, err := os.Stat(expandedPath); err != nil {
+			if os.IsNotExist(err) {
+				// Skip non-existent paths instead of failing
+				continue
+			}
+			return nil, fmt.Errorf("error checking log path %s: %v", expandedPath, err)
 		}
 	}
 

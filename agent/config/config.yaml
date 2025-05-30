@@ -1,0 +1,37 @@
+agent_id: "agent-001"
+backend:
+  url: "https://localhost:8080"
+  tls:
+    enabled: true
+    cert_file: "certs/tls.crt"
+    key_file: "certs/tls.key"
+    skip_verify: true
+security:
+  payload_encryption: true
+  encryption_key: "${ENCRYPTION_KEY}"
+  rate_limit: 100
+monitoring:
+  health_check_port: 8081
+  metrics_port: 9090
+  collection_interval: 30
+system:
+  log_paths:
+    - "${SYSTEM_LOG_PATH}/system.log"
+    - "${SYSTEM_LOG_PATH}/secure.log"
+    - "${SYSTEM_LOG_PATH}/auth.log"
+    - "${SYSTEM_LOG_PATH}/syslog"
+    - "${SYSTEM_LOG_PATH}/audit.log"
+    - "${SYSTEM_LOG_PATH}/messages"
+    - "${SYSTEM_LOG_PATH}/application.log"
+    - "${SYSTEM_LOG_PATH}/security.log"
+    - "${SYSTEM_LOG_PATH}/setupapi.log"
+  fim_paths:
+    - "${SYSTEM_CONFIG_PATH}"
+    - "${USER_CONFIG_PATH}"
+    - "${APPLICATION_DATA_PATH}"
+network:
+  interfaces:
+    - "en0" # Primary interface (usually the active one on macOS)
+    - "en1" # Secondary interface
+  capture_filter: "icmp or icmp6" # Focus on ICMP traffic for testing
+  max_packet_size: 65535 # Maximum packet size for better compatibility

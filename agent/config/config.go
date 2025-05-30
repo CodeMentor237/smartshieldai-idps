@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -45,19 +46,32 @@ type MonitoringConfig struct {
 	HealthCheckPort     int          `json:"health_check_port"`
 }
 
-// NetworkConfig represents network capture settings
+// NetworkConfig holds network capture configuration
 type NetworkConfig struct {
-	Interface string `json:"interface"`
-	BPFFilter string `json:"bpf_filter"`
+	Interfaces    []string `yaml:"interfaces"`
+	CaptureFilter string   `yaml:"capture_filter"`
+	MaxPacketSize int      `yaml:"max_packet_size"`
+	Promiscuous    bool     `yaml:"promiscuous"`
+	BufferSize     int      `yaml:"buffer_size"`
+	Timeout        time.Duration `yaml:"timeout"`
+	StatsInterval  time.Duration `yaml:"stats_interval"`
+	GeoIPDBPath    string   `yaml:"geoip_db_path"`
 }
 
 // SystemConfig represents system monitoring settings
 type SystemConfig struct {
-	LogPaths []string `json:"log_paths"`
+	LogPaths            []string `json:"log_paths"`
+	OsquerySocketPath   string   `json:"osquery_socket_path"`
 }
 
 // DefaultConfig returns the default configuration
 func DefaultConfig() *Config {
+	// Get default interface based on OS
+	defaultInterface := "eth0"
+	if runtime.GOOS == "darwin" {
+		defaultInterface = "en0"
+	}
+
 	return &Config{
 		AgentID: "agent-001",
 		Backend: BackendConfig{
@@ -79,14 +93,21 @@ func DefaultConfig() *Config {
 			HealthCheckPort:     8081,
 		},
 		Network: NetworkConfig{
-			Interface: "eth0",
-			BPFFilter: "",
+			Interfaces:     []string{defaultInterface},
+			MaxPacketSize:  65535,
+			CaptureFilter:  "",
+			Promiscuous:    true,
+			BufferSize:     1024 * 1024, // 1MB buffer
+			Timeout:        time.Second * 30,
+			StatsInterval:  time.Second * 30,
+			GeoIPDBPath:    "GeoLite2-City.mmdb",
 		},
 		System: SystemConfig{
-			LogPaths: []string{
+			LogPaths:            []string{
 				"/var/log/syslog",
 				"/var/log/auth.log",
 			},
+			OsquerySocketPath: "",
 		},
 	}
 }

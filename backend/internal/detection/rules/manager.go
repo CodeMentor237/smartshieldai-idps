@@ -19,6 +19,17 @@ import (
 	"github.com/hillu/go-yara/v4"
 )
 
+// RuleError represents a YARA rule compilation error
+type RuleError struct {
+	File    string
+	Line    int
+	Message string
+}
+
+func (e *RuleError) Error() string {
+	return fmt.Sprintf("%s:%d: %s", e.File, e.Line, e.Message)
+}
+
 // scanCallback implements yara.ScanCallback for collecting matches
 type scanCallback struct {
 	matches []yara.MatchRule
@@ -53,6 +64,7 @@ type RuleInfo struct {
 	Name     string       `json:"name"`
 	Metadata RuleMetadata `json:"metadata"`
 	Enabled  bool         `json:"enabled"`
+	Errors   []RuleError  `json:"errors,omitempty"`
 }
 
 // RulesManager handles YARA rules compilation and scanning
@@ -65,6 +77,7 @@ type RulesManager struct {
 	lastUpdated time.Time
 	scanCache   *lru.Cache
 	ruleCache   *lru.Cache
+	errors      []RuleError
 }
 
 // scanCacheKey combines data hash and rule version for cache key
@@ -97,7 +110,51 @@ func NewManager(rulesDir string) (*RulesManager, error) {
 		rulesInfo:   make(map[string]RuleInfo),
 		scanCache:   scanCache,
 		ruleCache:   ruleCache,
+		errors:      make([]RuleError, 0),
 	}, nil
+}
+
+// validateRule validates a YARA rule file
+func (rm *RulesManager) validateRule(content string, path string) error {
+	// Create a temporary compiler for validation
+	compiler, err := yara.NewCompiler()
+	if err != nil {
+		return fmt.Errorf("failed to create validation compiler: %v", err)
+	}
+	defer compiler.Destroy()
+
+	// Create namespace from directory structure
+	relPath, err := filepath.Rel(rm.rulesDir, path)
+	if err != nil {
+		return fmt.Errorf("failed to get relative path: %v", err)
+	}
+	namespace := strings.TrimSuffix(relPath, filepath.Ext(relPath))
+	namespace = strings.ReplaceAll(namespace, string(filepath.Separator), "_")
+
+	// Try to add the rule
+	if err := compiler.AddString(content, namespace); err != nil {
+		// Parse error message to extract line number
+		line := 0
+		if matches := regexp.MustCompile(`line (\d+)`).FindStringSubmatch(err.Error()); len(matches) > 1 {
+			fmt.Sscanf(matches[1], "%d", &line)
+		}
+		return &RuleError{
+			File:    path,
+			Line:    line,
+			Message: err.Error(),
+		}
+	}
+
+	// Try to compile
+	if _, err := compiler.GetRules(); err != nil {
+		return &RuleError{
+			File:    path,
+			Line:    0,
+			Message: err.Error(),
+		}
+	}
+
+	return nil
 }
 
 // extractMetadata extracts metadata from YARA rule file
@@ -162,6 +219,14 @@ func (rm *RulesManager) AddRuleFile(path string) error {
 		return fmt.Errorf("failed to read rule file %s: %v", path, err)
 	}
 
+	// Validate rule before adding
+	if err := rm.validateRule(string(content), path); err != nil {
+		if ruleErr, ok := err.(*RuleError); ok {
+			rm.errors = append(rm.errors, *ruleErr)
+		}
+		return err
+	}
+
 	metadata := rm.extractMetadata(string(content))
 	ruleName := filepath.Base(path)
 
@@ -178,7 +243,14 @@ func (rm *RulesManager) AddRuleFile(path string) error {
 		return nil
 	}
 
-	namespace := strings.TrimSuffix(ruleName, filepath.Ext(ruleName))
+	// Create namespace from directory structure
+	relPath, err := filepath.Rel(rm.rulesDir, path)
+	if err != nil {
+		return fmt.Errorf("failed to get relative path: %v", err)
+	}
+	namespace := strings.TrimSuffix(relPath, filepath.Ext(relPath))
+	namespace = strings.ReplaceAll(namespace, string(filepath.Separator), "_")
+
 	if err := rm.compiler.AddString(string(content), namespace); err != nil {
 		return fmt.Errorf("failed to compile rule file %s: %v", path, err)
 	}
@@ -309,34 +381,97 @@ func (rm *RulesManager) CheckForUpdates() (bool, error) {
 	return updated, err
 }
 
-// UpdateRules updates all rules from the rules directory
+// UpdateRules reloads all YARA rules from the rules directory
 func (rm *RulesManager) UpdateRules() error {
 	rm.mutex.Lock()
 	defer rm.mutex.Unlock()
 
-	// Create new compiler for clean slate
+	// Clear existing rules
+	rm.compiler.Destroy()
 	compiler, err := yara.NewCompiler()
 	if err != nil {
-		return fmt.Errorf("failed to create YARA compiler: %v", err)
+		return fmt.Errorf("failed to create compiler: %v", err)
 	}
 	rm.compiler = compiler
-
-	// Clear existing rules info
+	rm.errors = make([]RuleError, 0)
 	rm.rulesInfo = make(map[string]RuleInfo)
 
-	// Walk rules directory and add all rules
+	// Walk through rules directory
 	err = filepath.Walk(rm.rulesDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if !strings.HasSuffix(info.Name(), ".yar") {
+		// Skip directories and non-YARA files
+		if info.IsDir() || !strings.HasSuffix(strings.ToLower(path), ".yar") {
 			return nil
 		}
 
-		if err := rm.AddRuleFile(path); err != nil {
-			log.Printf("Warning: failed to add rule file %s: %v", path, err)
+		// Read rule file
+		content, err := ioutil.ReadFile(path)
+		if err != nil {
+			log.Printf("Warning: failed to read rule file %s: %v", path, err)
 			return nil
+		}
+
+		// Create namespace from directory structure
+		relPath, err := filepath.Rel(rm.rulesDir, path)
+		if err != nil {
+			log.Printf("Warning: failed to get relative path for %s: %v", path, err)
+			return nil
+		}
+		namespace := strings.TrimSuffix(relPath, filepath.Ext(relPath))
+		namespace = strings.ReplaceAll(namespace, string(filepath.Separator), "_")
+
+		// Create a new compiler for each rule
+		tempCompiler, err := yara.NewCompiler()
+		if err != nil {
+			log.Printf("Warning: failed to create temporary compiler for %s: %v", path, err)
+			return nil
+		}
+		defer tempCompiler.Destroy()
+
+		// Try to add the rule with namespace
+		if err := tempCompiler.AddString(string(content), namespace); err != nil {
+			line := 0
+			if matches := regexp.MustCompile(`line (\d+)`).FindStringSubmatch(err.Error()); len(matches) > 1 {
+				fmt.Sscanf(matches[1], "%d", &line)
+			}
+			ruleErr := &RuleError{
+				File:    path,
+				Line:    line,
+				Message: err.Error(),
+			}
+			rm.errors = append(rm.errors, *ruleErr)
+			log.Printf("Warning: failed to add rule %s: %v", path, err)
+			return nil
+		}
+
+		// Try to compile the rule
+		if _, err := tempCompiler.GetRules(); err != nil {
+			ruleErr := &RuleError{
+				File:    path,
+				Line:    0,
+				Message: err.Error(),
+			}
+			rm.errors = append(rm.errors, *ruleErr)
+			log.Printf("Warning: failed to compile rule %s: %v", path, err)
+			return nil
+		}
+
+		// Rule is valid, add it to the main compiler with namespace
+		if err := rm.compiler.AddString(string(content), namespace); err != nil {
+			log.Printf("Warning: failed to add valid rule %s to main compiler: %v", path, err)
+			return nil
+		}
+
+		// Extract and store metadata
+		metadata := rm.extractMetadata(string(content))
+		rm.rulesInfo[path] = RuleInfo{
+			Path:     path,
+			Name:     filepath.Base(path),
+			Metadata: metadata,
+			Enabled:  true,
 		}
 
 		return nil
@@ -346,7 +481,23 @@ func (rm *RulesManager) UpdateRules() error {
 		return fmt.Errorf("failed to walk rules directory: %v", err)
 	}
 
-	return rm.CompileRules()
+	// Compile all rules
+	rules, err := rm.compiler.GetRules()
+	if err != nil {
+		return fmt.Errorf("failed to compile rules: %v", err)
+	}
+
+	rm.rules = rules
+	rm.lastUpdated = time.Now()
+
+	return nil
+}
+
+// GetErrors returns any rule compilation errors
+func (rm *RulesManager) GetErrors() []RuleError {
+	rm.mutex.RLock()
+	defer rm.mutex.RUnlock()
+	return rm.errors
 }
 
 // GetRuleInfo returns information about all loaded rules
