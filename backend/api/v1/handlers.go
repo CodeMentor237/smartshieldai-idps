@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/hillu/go-yara/v4"
 	"github.com/smartshieldai-idps/backend/internal/detection/elasticsearch"
+	"github.com/smartshieldai-idps/backend/internal/detection/ml"
 	"github.com/smartshieldai-idps/backend/internal/detection/rules"
 	"github.com/smartshieldai-idps/backend/internal/middleware"
 	"github.com/smartshieldai-idps/backend/internal/models"
@@ -20,14 +21,16 @@ type Handler struct {
 	store    *store.Store
 	rules    *rules.RulesManager
 	esLogger *elasticsearch.Logger
+	ml       *ml.Service
 }
 
 // NewHandler creates a new API handler
-func NewHandler(store *store.Store, rules *rules.RulesManager, esLogger *elasticsearch.Logger) *Handler {
+func NewHandler(store *store.Store, rules *rules.RulesManager, esLogger *elasticsearch.Logger, mlService *ml.Service) *Handler {
 	return &Handler{
 		store:    store,
 		rules:    rules,
 		esLogger: esLogger,
+		ml:       mlService,
 	}
 }
 
@@ -45,6 +48,14 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 			rules.GET("/status", h.getRulesStatus)
 			rules.POST("/update", h.triggerRulesUpdate)
 			rules.GET("/list", h.listRules)
+		}
+
+		// ML model management endpoints
+		ml := v1.Group("/ml")
+		{
+			ml.GET("/status", h.getMLStatus)
+			ml.POST("/retrain", h.triggerMLRetrain)
+			ml.GET("/stats", h.getMLStats)
 		}
 	}
 }
@@ -79,11 +90,31 @@ func (h *Handler) handleDataIngestion(c *gin.Context) {
 		return
 	}
 
-	// Scan data for threats
+	// Scan data for threats using YARA rules
 	matches, err := h.rules.ScanData(dataBytes)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan data"})
 		return
+	}
+
+	// If ML detection is enabled, analyze data for anomalies
+	var mlResult *ml.DetectionResult
+	if h.ml != nil {
+		result, err := h.ml.Detect(req.Data)
+		if err != nil {
+			log.Printf("Warning: ML detection failed: %v", err)
+		} else if result.IsAnomaly {
+			// Add ML detection to matches
+			matches = append(matches, yara.MatchRule{
+				Rule: "ml_anomaly",
+				Tags: []string{"ml", "anomaly"},
+				Metas: []yara.Meta{
+					{Identifier: "severity", Value: "high"},
+					{Identifier: "description", Value: result.Explanation},
+				},
+			})
+			mlResult = result
+		}
 	}
 
 	// If threats detected and ES logger is available, log them
@@ -108,6 +139,10 @@ func (h *Handler) handleDataIngestion(c *gin.Context) {
 	if len(matches) > 0 {
 		response["alert"] = "Threats detected and logged"
 		response["severity"] = getSeverityFromMatches(matches)
+	}
+
+	if mlResult != nil {
+		response["ml_detection"] = mlResult
 	}
 
 	c.JSON(http.StatusAccepted, response)
@@ -246,5 +281,53 @@ func (h *Handler) listRules(c *gin.Context) {
 	c.JSON(http.StatusOK, middleware.APIResponse{
 		Status: "success",
 		Data:   ruleInfo,
+	})
+}
+
+// getMLStatus returns the current status of the ML model
+func (h *Handler) getMLStatus(c *gin.Context) {
+	if h.ml == nil {
+		c.JSON(http.StatusServiceUnavailable, middleware.APIResponse{
+			Status:  "error",
+			Message: "ML detection is not available",
+		})
+		return
+	}
+
+	stats := h.ml.GetStats()
+	c.JSON(http.StatusOK, middleware.APIResponse{
+		Status: "success",
+		Data: gin.H{
+			"version":       stats.Version,
+			"last_updated": stats.LastUpdated.Format("2006-01-02 15:04:05"),
+			"accuracy":     stats.Accuracy,
+			"fp_rate":      stats.FalsePositive,
+			"fn_rate":      stats.FalseNegative,
+		},
+	})
+}
+
+// triggerMLRetrain is a no-op for pre-trained model
+func (h *Handler) triggerMLRetrain(c *gin.Context) {
+	c.JSON(http.StatusOK, middleware.APIResponse{
+		Status:  "success",
+		Message: "Pre-trained model does not support retraining",
+	})
+}
+
+// getMLStats returns detailed statistics about the ML model
+func (h *Handler) getMLStats(c *gin.Context) {
+	if h.ml == nil {
+		c.JSON(http.StatusServiceUnavailable, middleware.APIResponse{
+			Status:  "error",
+			Message: "ML detection is not available",
+		})
+		return
+	}
+
+	stats := h.ml.GetStats()
+	c.JSON(http.StatusOK, middleware.APIResponse{
+		Status: "success",
+		Data:   stats,
 	})
 }

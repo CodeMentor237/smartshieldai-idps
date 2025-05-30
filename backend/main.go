@@ -14,6 +14,7 @@ import (
 	v1 "github.com/smartshieldai-idps/backend/api/v1"
 	"github.com/smartshieldai-idps/backend/config"
 	"github.com/smartshieldai-idps/backend/internal/detection/elasticsearch"
+	"github.com/smartshieldai-idps/backend/internal/detection/ml"
 	"github.com/smartshieldai-idps/backend/internal/detection/rules"
 	"github.com/smartshieldai-idps/backend/internal/middleware"
 	"github.com/smartshieldai-idps/backend/internal/store"
@@ -66,42 +67,60 @@ func main() {
 		log.Println("Threat logging to Elasticsearch will be disabled")
 	}
 
+	// Initialize ML detection service if enabled
+	var mlService *ml.Service
+	if cfg.Detection.ML.Enabled {
+		mlConfig := ml.ModelConfig{
+			InputSize:     cfg.Detection.ML.InputSize,
+			HiddenSize:    cfg.Detection.ML.HiddenSize,
+			NumLayers:     cfg.Detection.ML.NumLayers,
+			DropoutRate:   cfg.Detection.ML.DropoutRate,
+			LearningRate:  cfg.Detection.ML.LearningRate,
+			BatchSize:     cfg.Detection.ML.BatchSize,
+			Epochs:        cfg.Detection.ML.Epochs,
+			ModelPath:     cfg.Detection.ML.ModelPath,
+		}
+
+		mlService, err = ml.NewService(mlConfig)
+		if err != nil {
+			log.Printf("Warning: failed to initialize ML detection service: %v", err)
+			log.Println("ML-based detection will be disabled")
+		} else {
+			if err := mlService.Start(); err != nil {
+				log.Printf("Warning: failed to start ML detection service: %v", err)
+				log.Println("ML-based detection will be disabled")
+				mlService = nil
+			} else {
+				log.Println("ML detection service started successfully with pre-trained model")
+			}
+			defer mlService.Stop()
+		}
+	}
+
 	// Initialize Gin router with middleware
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 
 	// Add recovery, logging, and security middleware
-	router.Use(gin.Recovery())
-	router.Use(gin.Logger())
-	router.Use(middleware.SecurityHeaders())
-
-	// Add rate limiting (100 requests per minute with burst of 10)
-	rateLimiter := middleware.NewRateLimiter(rate.Limit(100.0/60.0), 10)
-	router.Use(rateLimiter.RateLimit())
-
-	// Add request validation and timeout
-	router.Use(middleware.ValidateJSON())
+	router.Use(middleware.Recovery())
+	router.Use(middleware.Logger())
+	router.Use(middleware.Security())
 	router.Use(middleware.RequestTimeout(30 * time.Second))
+	router.Use(middleware.RateLimit(rate.NewLimiter(rate.Limit(cfg.Security.RateLimit), cfg.Security.RateLimitBurst)))
 
-	// Initialize API handlers with all components
-	handler := v1.NewHandler(dataStore, rulesManager, esLogger)
+	// Initialize API handler
+	handler := v1.NewHandler(dataStore, rulesManager, esLogger, mlService)
 	handler.RegisterRoutes(router)
 
-	// Configure TLS
-	tlsConfig := config.GetTLSConfig()
-	server := &http.Server{
-		Addr:         ":" + cfg.Port,
-		Handler:      router,
-		TLSConfig:    tlsConfig,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  120 * time.Second,
+	// Start server
+	srv := &http.Server{
+		Addr:    ":" + cfg.Server.Port,
+		Handler: router,
 	}
 
 	// Start server in a goroutine
 	go func() {
-		log.Printf("Server starting on port %s", cfg.Port)
-		if err := server.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile); err != nil && err != http.ErrServerClosed {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start server: %v", err)
 		}
 	}()
@@ -111,16 +130,14 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
+	// Graceful shutdown
 	log.Println("Shutting down server...")
-
-	// Create shutdown context with 5 second timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Attempt graceful shutdown
-	if err := server.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(ctx); err != nil {
 		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 
-	log.Println("Server exited successfully")
+	log.Println("Server exiting")
 }
