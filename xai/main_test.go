@@ -11,7 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
-	"github.com/olivere/elastic/v7"
+	"github.com/smartshieldai-idps/xai/pkg/xai"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
@@ -19,6 +19,7 @@ import (
 // MockRedisClient is a mock implementation of the Redis client
 type MockRedisClient struct {
 	mock.Mock
+	*redis.Client // Embed redis.Client to satisfy interface
 }
 
 func (m *MockRedisClient) Set(ctx context.Context, key string, value interface{}, expiration time.Duration) *redis.StatusCmd {
@@ -31,114 +32,47 @@ func (m *MockRedisClient) Ping(ctx context.Context) *redis.StatusCmd {
 	return args.Get(0).(*redis.StatusCmd)
 }
 
-// MockElasticClient is a mock implementation of the Elasticsearch client
-type MockElasticClient struct {
-	mock.Mock
+func (m *MockRedisClient) Get(ctx context.Context, key string) *redis.StringCmd {
+	args := m.Called(ctx, key)
+	return args.Get(0).(*redis.StringCmd)
 }
 
-func (m *MockElasticClient) Index() *elastic.IndexService {
-	args := m.Called()
-	return args.Get(0).(*elastic.IndexService)
+func (m *MockRedisClient) Keys(ctx context.Context, pattern string) *redis.StringSliceCmd {
+	args := m.Called(ctx, pattern)
+	return args.Get(0).(*redis.StringSliceCmd)
 }
 
-func (m *MockElasticClient) Ping(url string) *elastic.PingService {
-	args := m.Called(url)
-	return args.Get(0).(*elastic.PingService)
+func (m *MockRedisClient) Scan(ctx context.Context, cursor uint64, match string, count int64) *redis.ScanCmd {
+	args := m.Called(ctx, cursor, match, count)
+	return args.Get(0).(*redis.ScanCmd)
 }
 
-func setupTestService() (*XAIService, *MockRedisClient, *MockElasticClient) {
-	config := Config{
-		BackendURL:   "http://localhost:8080",
-		RedisURL:     "localhost:6379",
-		ElasticURL:   "http://localhost:9200",
-		Port:         "8000",
-		ModelVersion: "1.0.0",
+func setupTestHandler() (*xai.Handler, *MockRedisClient) {
+	mockRedis := &MockRedisClient{
+		Client: redis.NewClient(&redis.Options{
+			Addr: "localhost:6379",
+		}),
 	}
-
-	mockRedis := new(MockRedisClient)
-	mockElastic := new(MockElasticClient)
-
-	service := &XAIService{
-		config:  config,
-		redis:   mockRedis,
-		elastic: mockElastic,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
-	}
-
-	return service, mockRedis, mockElastic
+	handler := xai.NewHandler(mockRedis)
+	return handler, mockRedis
 }
 
-func setupRouter(service *XAIService) *gin.Engine {
+func setupRouter(handler *xai.Handler) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.Default()
-
-	r.GET("/health", func(c *gin.Context) {
-		redisErr := service.redis.Ping(c.Request.Context()).Err()
-		elasticErr := service.elastic.Ping(c.Request.Context()).Do(c.Request.Context())
-
-		status := "healthy"
-		if redisErr != nil || elasticErr != nil {
-			status = "degraded"
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"status":  status,
-			"redis":   redisErr == nil,
-			"elastic": elasticErr == nil,
-		})
-	})
-
-	r.POST("/explain", func(c *gin.Context) {
-		var req ExplanationRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "Invalid request format",
-			})
-			return
-		}
-
-		if len(req.InputFeatures) != len(req.FeatureNames) {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "Number of features and feature names must match",
-			})
-			return
-		}
-
-		explanation := service.generateExplanation(req)
-
-		if err := service.logExplanation(c.Request.Context(), explanation); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to log explanation",
-			})
-			return
-		}
-
-		cacheKey := "explanation:" + req.ModelOutput.ModelVersion
-		if err := service.cacheExplanation(c.Request.Context(), cacheKey, explanation); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to cache explanation",
-			})
-			return
-		}
-
-		c.JSON(http.StatusOK, explanation)
-	})
-
+	handler.RegisterRoutes(r)
 	return r
 }
 
 func TestHealthCheck(t *testing.T) {
-	service, mockRedis, mockElastic := setupTestService()
-	router := setupRouter(service)
+	handler, mockRedis := setupTestHandler()
+	router := setupRouter(handler)
 
-	// Mock Redis and Elasticsearch responses
+	// Mock Redis ping response
 	mockRedis.On("Ping", mock.Anything).Return(redis.NewStatusCmd(context.Background()))
-	mockElastic.On("Ping", mock.Anything).Return(&elastic.PingService{})
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/health", nil)
+	req, _ := http.NewRequest("GET", "/api/v1/xai/health", nil)
 	router.ServeHTTP(w, req)
 
 	assert.Equal(t, 200, w.Code)
@@ -147,17 +81,16 @@ func TestHealthCheck(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "healthy", response["status"])
 	assert.True(t, response["redis"].(bool))
-	assert.True(t, response["elastic"].(bool))
 }
 
 func TestExplainPrediction(t *testing.T) {
-	service, mockRedis, mockElastic := setupTestService()
-	router := setupRouter(service)
+	handler, mockRedis := setupTestHandler()
+	router := setupRouter(handler)
 
-	reqBody := ExplanationRequest{
-		ModelOutput: ModelOutput{
-			Score:       0.85,
-			Confidence:  0.9,
+	reqBody := xai.ExplanationRequest{
+		ModelOutput: xai.ModelOutput{
+			Score:        0.85,
+			Confidence:   0.9,
 			ModelVersion: "1.0.0",
 		},
 		InputFeatures: []float64{1.0, 2.0, 3.0},
@@ -165,47 +98,50 @@ func TestExplainPrediction(t *testing.T) {
 	}
 	jsonBody, _ := json.Marshal(reqBody)
 
-	// Mock Redis and Elasticsearch responses
+	// Mock Redis responses
 	mockRedis.On("Set", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(redis.NewStatusCmd(context.Background()))
-	mockElastic.On("Index").Return(&elastic.IndexService{})
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("POST", "/explain", bytes.NewBuffer(jsonBody))
+	req, _ := http.NewRequest("POST", "/api/v1/xai/explain", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(w, req)
 
 	assert.Equal(t, 200, w.Code)
-	var response ExplanationResponse
+	var response map[string]interface{}
 	err := json.Unmarshal(w.Body.Bytes(), &response)
 	assert.NoError(t, err)
-	assert.NotEmpty(t, response.Explanation)
-	assert.Equal(t, 0.9, response.ConfidenceScore)
-	assert.Equal(t, "1.0.0", response.ModelVersion)
-	assert.Len(t, response.FeatureImportance, 3)
+	assert.NotNil(t, response["id"])
+	assert.NotNil(t, response["explanation"])
+
+	explanation := response["explanation"].(map[string]interface{})
+	assert.NotEmpty(t, explanation["explanation"])
+	assert.Equal(t, 0.9, explanation["confidence_score"])
+	assert.Equal(t, "1.0.0", explanation["model_version"])
+	assert.Len(t, explanation["feature_importance"], 3)
 }
 
 func TestExplainPredictionInvalidInput(t *testing.T) {
-	service, _, _ := setupTestService()
-	router := setupRouter(service)
+	handler, _ := setupTestHandler()
+	router := setupRouter(handler)
 
-	reqBody := ExplanationRequest{
-		ModelOutput: ModelOutput{
-			Score:       0.85,
-			Confidence:  0.9,
+	reqBody := xai.ExplanationRequest{
+		ModelOutput: xai.ModelOutput{
+			Score:        0.85,
+			Confidence:   0.9,
 			ModelVersion: "1.0.0",
 		},
-		InputFeatures: []float64{1.0, 2.0},  // Mismatched length
+		InputFeatures: []float64{1.0, 2.0}, // Mismatched length
 		FeatureNames:  []string{"feature1", "feature2", "feature3"},
 	}
 	jsonBody, _ := json.Marshal(reqBody)
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("POST", "/explain", bytes.NewBuffer(jsonBody))
+	req, _ := http.NewRequest("POST", "/api/v1/xai/explain", bytes.NewBuffer(jsonBody))
 	req.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(w, req)
 
 	assert.Equal(t, 400, w.Code)
-	var response map[string]string
+	var response map[string]interface{}
 	err := json.Unmarshal(w.Body.Bytes(), &response)
 	assert.NoError(t, err)
 	assert.Equal(t, "Number of features and feature names must match", response["error"])
