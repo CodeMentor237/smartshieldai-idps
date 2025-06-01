@@ -15,6 +15,7 @@ import (
 	"github.com/smartshieldai-idps/backend/config"
 	"github.com/smartshieldai-idps/backend/internal/detection/elasticsearch"
 	"github.com/smartshieldai-idps/backend/internal/detection/ml"
+	"github.com/smartshieldai-idps/backend/internal/detection/prevention"
 	"github.com/smartshieldai-idps/backend/internal/detection/rules"
 	"github.com/smartshieldai-idps/backend/internal/middleware"
 	"github.com/smartshieldai-idps/backend/internal/store"
@@ -71,14 +72,36 @@ func main() {
 	var mlService *ml.Service
 	if cfg.Detection.ML.Enabled {
 		mlConfig := ml.ModelConfig{
-			InputSize:     cfg.Detection.ML.InputSize,
-			HiddenSize:    cfg.Detection.ML.HiddenSize,
-			NumLayers:     cfg.Detection.ML.NumLayers,
-			DropoutRate:   cfg.Detection.ML.DropoutRate,
-			LearningRate:  cfg.Detection.ML.LearningRate,
-			BatchSize:     cfg.Detection.ML.BatchSize,
-			Epochs:        cfg.Detection.ML.Epochs,
-			ModelPath:     cfg.Detection.ML.ModelPath,
+			// Model architecture
+			InputSize:      cfg.Detection.ML.InputSize,
+			HiddenSize:     cfg.Detection.ML.HiddenSize,
+			NumLayers:      cfg.Detection.ML.NumLayers,
+			DropoutRate:    cfg.Detection.ML.DropoutRate,
+			
+			// Training parameters
+			LearningRate:   cfg.Detection.ML.LearningRate,
+			BatchSize:      cfg.Detection.ML.BatchSize,
+			Epochs:         cfg.Detection.ML.Epochs,
+			
+			// Model metadata
+			ModelPath:      cfg.Detection.ML.ModelPath,
+			Version:        "1.0.0", // Initial version
+			LastUpdated:    time.Now(),
+
+			// Performance thresholds
+			MinAccuracy:    cfg.Detection.ML.MinAccuracy,
+			DriftThreshold: cfg.Detection.ML.DriftThreshold,
+			FalsePositive:  cfg.Detection.ML.MaxFalsePositive,
+			FalseNegative:  cfg.Detection.ML.MaxFalseNegative,
+
+			// CNN specific parameters
+			ConvFilters:    128,
+			ConvKernelSize: 3,
+			PoolingSize:    2,
+
+			// BiLSTM specific parameters
+			BidirectionalLayers: 2,
+			LSTMDropoutRate:     0.2,
 		}
 
 		mlService, err = ml.NewService(mlConfig)
@@ -86,12 +109,38 @@ func main() {
 			log.Printf("Warning: failed to initialize ML detection service: %v", err)
 			log.Println("ML-based detection will be disabled")
 		} else {
+			// Set up prevention integration if enabled
+			if cfg.Prevention.Enabled {
+				rollbackTimeout, err := time.ParseDuration(cfg.Prevention.RollbackTimeout)
+				if err != nil {
+					log.Printf("Warning: invalid rollback timeout %q, using default", cfg.Prevention.RollbackTimeout)
+					rollbackTimeout = 30 * time.Second
+				}
+				
+				preventionCfg := prevention.Config{
+					EnableBlockIP:     cfg.Prevention.EnableBlockIP,
+					EnableProcessKill: cfg.Prevention.EnableProcessKill,
+					WhitelistedIPs:   cfg.Prevention.WhitelistedIPs,
+					WhitelistedProcs: cfg.Prevention.WhitelistedProcs,
+					RollbackTimeout:  rollbackTimeout,
+					ESAddrs:         cfg.ElasticsearchAddrs,
+					ESUser:          cfg.ElasticsearchUser,
+					ESPass:          cfg.ElasticsearchPass,
+					ESIndex:         cfg.ElasticsearchIndex,
+					LogActions:      true,
+					AlertThreshold:  0.9, // High confidence required for prevention actions
+				}
+				preventionHandler := prevention.NewHandler(preventionCfg)
+				mlService.AddPreventionHandler(preventionHandler)
+				log.Println("Prevention layer integrated with ML detection")
+			}
+			
 			if err := mlService.Start(); err != nil {
 				log.Printf("Warning: failed to start ML detection service: %v", err)
 				log.Println("ML-based detection will be disabled")
 				mlService = nil
 			} else {
-				log.Println("ML detection service started successfully with pre-trained model")
+				log.Printf("ML detection service started successfully with CNN-BiLSTM model v%s", mlService.GetMetrics().Version)
 			}
 			defer mlService.Stop()
 		}

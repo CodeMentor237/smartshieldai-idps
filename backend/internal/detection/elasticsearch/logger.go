@@ -1,3 +1,4 @@
+// Package elasticsearch provides Elasticsearch integration for logging
 package elasticsearch
 
 import (
@@ -21,6 +22,17 @@ type ThreatAlert struct {
 	Description string           `json:"description"`
 	MatchData   json.RawMessage  `json:"match_data"`
 	Source      models.AgentData `json:"source_data"`
+}
+
+// PreventionAction represents a prevention action taken
+type PreventionAction struct {
+	Type      string                 `json:"type"`
+	Target    string                 `json:"target"`
+	Timestamp time.Time             `json:"timestamp"`
+	Success   bool                   `json:"success"`
+	Error     string                 `json:"error,omitempty"`
+	Reason    string                 `json:"reason"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // Logger handles logging threats to Elasticsearch
@@ -49,69 +61,79 @@ func NewLogger(addresses []string, username, password, index string) (*Logger, e
 }
 
 // LogThreat logs a detected threat to Elasticsearch
-func (l *Logger) LogThreat(ctx context.Context, data *models.AgentData, matches []yara.MatchRule) error {
-	for _, match := range matches {
-		alert := ThreatAlert{
-			Timestamp:   time.Now(),
-			AgentID:    data.AgentID,
-			RuleName:   match.Rule,
-			Severity:   getSeverity(match),
-			Description: getDescription(match),
-			Source:     *data,
-		}
+func (l *Logger) LogThreat(alert ThreatAlert) error {
+	// Marshal alert to JSON
+	alertJSON, err := json.Marshal(alert)
+	if err != nil {
+		return fmt.Errorf("failed to marshal alert: %v", err)
+	}
 
-		// Add matched strings as match data
-		matchData := map[string]interface{}{
-			"strings": match.Strings,
-			"tags":    match.Tags,
-		}
-		matchJSON, err := json.Marshal(matchData)
-		if err != nil {
-			return fmt.Errorf("failed to marshal match data: %v", err)
-		}
-		alert.MatchData = matchJSON
+	// Index the alert
+	res, err := l.client.Index(
+		l.index,
+		bytes.NewReader(alertJSON),
+		l.client.Index.WithContext(context.Background()),
+		l.client.Index.WithRefresh("true"),
+		l.client.Index.WithPipeline("threat-alerts"),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to index alert: %v", err)
+	}
+	defer res.Body.Close()
 
-		// Index the alert
-		alertJSON, err := json.Marshal(alert)
-		if err != nil {
-			return fmt.Errorf("failed to marshal alert: %v", err)
-		}
-
-		res, err := l.client.Index(
-			l.index,
-			bytes.NewReader(alertJSON),
-			l.client.Index.WithContext(ctx),
-			l.client.Index.WithPipeline("threat-alerts"),
-		)
-		if err != nil {
-			return fmt.Errorf("failed to index alert: %v", err)
-		}
-		defer res.Body.Close()
-
-		if res.IsError() {
-			return fmt.Errorf("error indexing alert: %s", res.String())
-		}
+	if res.IsError() {
+		return fmt.Errorf("error indexing alert: %s", res.String())
 	}
 
 	return nil
 }
 
-// getSeverity extracts severity from YARA rule metadata
+// LogPreventionAction logs a prevention action to Elasticsearch
+func (l *Logger) LogPreventionAction(action PreventionAction) error {
+	// Marshal action to JSON
+	actionJSON, err := json.Marshal(action)
+	if err != nil {
+		return fmt.Errorf("failed to marshal prevention action: %v", err)
+	}
+
+	// Index the action
+	res, err := l.client.Index(
+		fmt.Sprintf("%s-prevention", l.index),
+		bytes.NewReader(actionJSON),
+		l.client.Index.WithContext(context.Background()),
+		l.client.Index.WithRefresh("true"),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to index prevention action: %v", err)
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		return fmt.Errorf("error indexing prevention action: %s", res.String())
+	}
+
+	return nil
+}
+
+// Helper functions to extract metadata from YARA matches
 func getSeverity(match yara.MatchRule) string {
 	for _, meta := range match.Metas {
 		if meta.Identifier == "severity" {
-			return meta.Value.(string)
+			if sev, ok := meta.Value.(string); ok {
+				return sev
+			}
 		}
 	}
-	return "medium" // default severity
+	return "medium" // Default severity
 }
 
-// getDescription extracts description from YARA rule metadata
 func getDescription(match yara.MatchRule) string {
 	for _, meta := range match.Metas {
 		if meta.Identifier == "description" {
-			return meta.Value.(string)
+			if desc, ok := meta.Value.(string); ok {
+				return desc
+			}
 		}
 	}
-	return fmt.Sprintf("Match found for rule: %s", match.Rule)
+	return fmt.Sprintf("Matched rule: %s", match.Rule)
 }

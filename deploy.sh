@@ -185,4 +185,74 @@ echo "Testing connectivity..."
 # Test backend health
 kubectl exec -n smartshield deploy/smartshield-agent -- wget -qO- --no-check-certificate https://smartshield-backend.smartshield.svc.cluster.local:8080/health
 
-echo "System is ready for testing!" 
+echo "System is ready for testing!"
+
+# Build and deploy all services
+
+# Build XAI Service
+echo "Building XAI Service..."
+cd xai
+docker build -t smartshieldai-xai:latest .
+cd ..
+
+# Build Backend API
+echo "Building Backend API..."
+cd backend
+docker build -t smartshieldai-backend:latest .
+cd ..
+
+# Build Agent
+echo "Building Agent..."
+cd agent
+docker build -t smartshieldai-agent:latest .
+cd ..
+
+# Create Docker network if it doesn't exist
+docker network create smartshieldai-network || true
+
+# Deploy Redis
+echo "Deploying Redis..."
+docker run -d --name redis \
+    --network smartshieldai-network \
+    -p 6379:6379 \
+    redis:latest
+
+# Deploy Elasticsearch
+echo "Deploying Elasticsearch..."
+docker run -d --name elasticsearch \
+    --network smartshieldai-network \
+    -p 9200:9200 -p 9300:9300 \
+    -e "discovery.type=single-node" \
+    -e "xpack.security.enabled=false" \
+    docker.elastic.co/elasticsearch/elasticsearch:7.17.0
+
+# Deploy XAI Service
+echo "Deploying XAI Service..."
+docker run -d --name xai \
+    --network smartshieldai-network \
+    -p 8000:8000 \
+    -e "XAI_PORT=8000" \
+    smartshieldai-xai:latest
+
+# Deploy Backend API
+echo "Deploying Backend API..."
+docker run -d --name backend \
+    --network smartshieldai-network \
+    -p 8080:8080 \
+    -e "REDIS_URL=redis:6379" \
+    -e "ELASTICSEARCH_URL=http://elasticsearch:9200" \
+    -e "XAI_URL=http://xai:8000" \
+    smartshieldai-backend:latest
+
+# Deploy Agent
+echo "Deploying Agent..."
+docker run -d --name agent \
+    --network smartshieldai-network \
+    -e "BACKEND_URL=http://backend:8080" \
+    smartshieldai-agent:latest
+
+echo "All services deployed successfully!"
+echo "XAI Service: http://localhost:8000"
+echo "Backend API: http://localhost:8080"
+echo "Elasticsearch: http://localhost:9200"
+echo "Redis: localhost:6379" 

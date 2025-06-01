@@ -84,20 +84,25 @@ check_port() {
 # Function to start Redis
 start_redis() {
     echo "Starting Redis..."
-    if ! command -v redis-server &> /dev/null; then
-        echo "Redis is not installed. Installing Redis..."
-        install_with_brew redis
-    fi
-    
-    # Check if Redis is already running
-    if pgrep -f "redis-server.*:6379" > /dev/null; then
-        echo "Using existing Redis instance"
-        REDIS_PID=$(pgrep -f "redis-server.*:6379")
-    else
-        redis-server --port 6379 &
-        REDIS_PID=$!
-        sleep 2
-    fi
+    docker run -d --name redis -p 6379:6379 redis:latest
+}
+
+# Function to start Elasticsearch
+start_elasticsearch() {
+    echo "Starting Elasticsearch..."
+    docker run -d --name elasticsearch -p 9200:9200 -p 9300:9300 \
+        -e "discovery.type=single-node" \
+        -e "xpack.security.enabled=false" \
+        docker.elastic.co/elasticsearch/elasticsearch:7.17.0
+}
+
+# Function to start XAI Service
+start_xai() {
+    echo "Starting XAI Service..."
+    cd xai
+    go run main.go &
+    XAI_PID=$!
+    cd ..
 }
 
 # Function to start the backend
@@ -121,14 +126,15 @@ start_agent() {
 
 # Function to cleanup on exit
 cleanup() {
-    echo "Cleaning up..."
-    kill $REDIS_PID 2>/dev/null || true
-    kill $BACKEND_PID 2>/dev/null || true
-    kill $AGENT_PID 2>/dev/null || true
+    echo "Shutting down services..."
+    kill $XAI_PID $BACKEND_PID $AGENT_PID
+    docker stop redis elasticsearch
+    docker rm redis elasticsearch
+    exit 0
 }
 
 # Set up cleanup on script exit
-trap cleanup EXIT
+trap cleanup SIGINT SIGTERM
 
 # Check for root privileges
 check_root
@@ -165,6 +171,8 @@ fi
 
 # Start services
 start_redis
+start_elasticsearch
+start_xai
 start_backend
 start_agent
 

@@ -100,17 +100,22 @@ func (h *Handler) handleDataIngestion(c *gin.Context) {
 	// If ML detection is enabled, analyze data for anomalies
 	var mlResult *ml.DetectionResult
 	if h.ml != nil {
-		result, err := h.ml.Detect(req.Data)
+		result, err := h.ml.Predict(req.Data)
 		if err != nil {
 			log.Printf("Warning: ML detection failed: %v", err)
 		} else if result.IsAnomaly {
+			severity := "medium"
+			if result.Confidence > 0.8 {
+				severity = "high"
+			}
 			// Add ML detection to matches
 			matches = append(matches, yara.MatchRule{
-				Rule: "ml_anomaly",
-				Tags: []string{"ml", "anomaly"},
+				Rule: "ml_anomaly_detection",
+				Tags: []string{"ml", "anomaly", result.AnomalyType},
 				Metas: []yara.Meta{
-					{Identifier: "severity", Value: "high"},
+					{Identifier: "severity", Value: severity},
 					{Identifier: "description", Value: result.Explanation},
+					{Identifier: "confidence", Value: result.Confidence},
 				},
 			})
 			mlResult = result
@@ -119,9 +124,36 @@ func (h *Handler) handleDataIngestion(c *gin.Context) {
 
 	// If threats detected and ES logger is available, log them
 	if len(matches) > 0 && h.esLogger != nil {
-		if err := h.esLogger.LogThreat(c.Request.Context(), &req.Data, matches); err != nil {
+		alert := elasticsearch.ThreatAlert{
+			Timestamp:   time.Now(),
+			AgentID:    req.Data.AgentID,
+			RuleName:   matches[0].Rule,
+			Severity:   getSeverityFromMatches(matches),
+			Description: getDescriptionFromMatches(matches),
+			Source:     req.Data,
+			MatchData:  json.RawMessage(dataBytes),
+		}
+		if err := h.esLogger.LogThreat(alert); err != nil {
 			// Log the error but don't fail the request
 			log.Printf("Warning: failed to log threats: %v", err)
+		}
+
+		// If ML detected the anomaly, also log the prevention action
+		if mlResult != nil && mlResult.IsAnomaly {
+			preventionAction := elasticsearch.PreventionAction{
+				Type:      mlResult.AnomalyType,
+				Target:    req.Data.Source,
+				Timestamp: time.Now(),
+				Success:   true,
+				Reason:    mlResult.Explanation,
+				Metadata: map[string]interface{}{
+					"confidence": mlResult.Confidence,
+					"source_data": req.Data,
+				},
+			}
+			if err := h.esLogger.LogPreventionAction(preventionAction); err != nil {
+				log.Printf("Warning: failed to log prevention action: %v", err)
+			}
 		}
 	}
 
@@ -172,6 +204,24 @@ func getSeverityFromMatches(matches []yara.MatchRule) string {
 	}
 
 	return highestSeverity
+}
+
+// getDescriptionFromMatches combines descriptions from all matches
+func getDescriptionFromMatches(matches []yara.MatchRule) string {
+	var description string
+	for i, match := range matches {
+		for _, meta := range match.Metas {
+			if meta.Identifier == "description" {
+				if desc, ok := meta.Value.(string); ok {
+					if i > 0 {
+						description += "; "
+					}
+					description += desc
+				}
+			}
+		}
+	}
+	return description
 }
 
 // handleDataRetrieval handles data retrieval requests
@@ -294,15 +344,20 @@ func (h *Handler) getMLStatus(c *gin.Context) {
 		return
 	}
 
-	stats := h.ml.GetStats()
+	metrics := h.ml.GetMetrics()
 	c.JSON(http.StatusOK, middleware.APIResponse{
 		Status: "success",
 		Data: gin.H{
-			"version":       stats.Version,
-			"last_updated": stats.LastUpdated.Format("2006-01-02 15:04:05"),
-			"accuracy":     stats.Accuracy,
-			"fp_rate":      stats.FalsePositive,
-			"fn_rate":      stats.FalseNegative,
+			"version":            metrics.Version,
+			"last_updated":       metrics.LastMetricsUpdate.Format(time.RFC3339),
+			"total_predictions": metrics.TotalPredictions,
+			"anomalies_detected": metrics.AnomaliesDetected,
+			"accuracy":           metrics.Accuracy,
+			"f1_score":          metrics.F1Score,
+			"average_latency":    metrics.AverageLatency,
+			"false_positives":    metrics.FalsePositives,
+			"false_negatives":    metrics.FalseNegatives,
+			"drift_score":        metrics.DriftScore,
 		},
 	})
 }
@@ -325,9 +380,21 @@ func (h *Handler) getMLStats(c *gin.Context) {
 		return
 	}
 
-	stats := h.ml.GetStats()
+	metrics := h.ml.GetMetrics()
 	c.JSON(http.StatusOK, middleware.APIResponse{
 		Status: "success",
-		Data:   stats,
+		Data: gin.H{
+			"metrics": metrics,
+			"model_info": gin.H{
+				"architecture": "CNN-BiLSTM",
+				"input_size":   h.ml.GetConfig().InputSize,
+				"hidden_size":  h.ml.GetConfig().HiddenSize,
+				"num_layers":   h.ml.GetConfig().NumLayers,
+				"thresholds": gin.H{
+					"min_accuracy":    h.ml.GetConfig().MinAccuracy,
+					"drift_threshold": h.ml.GetConfig().DriftThreshold,
+				},
+			},
+		},
 	})
 }

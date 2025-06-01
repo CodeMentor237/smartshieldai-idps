@@ -17,20 +17,44 @@ detection:
   max_concurrent_scans: 10
   ml:
     enabled: true
-    model_path: "./models/ml_model.json"
-    input_size: 64
-    hidden_size: 128
+    model_path: "/models/cnn_bilstm_v1.model"
+    input_size: 128
+    hidden_size: 256
     num_layers: 2
-    dropout_rate: 0.2
+    dropout_rate: 0.3
     learning_rate: 0.001
-    batch_size: 32
-    epochs: 10
-    min_accuracy: 0.85
+    batch_size: 64
+    epochs: 100
+    min_accuracy: 0.90
     max_false_positive: 0.15
     max_false_negative: 0.15
-    update_interval: "1h"
-    retrain_interval: "24h"
+    drift_threshold: 0.3
+    update_interval: "24h"
+    retrain_interval: "168h" # 1 week
+    # CNN specific parameters
+    conv_filters: 64
+    conv_kernel_size: 3
+    pooling_size: 2
+    # BiLSTM specific parameters
+    bidirectional_layers: 2
+    lstm_dropout_rate: 0.2
 security:
   rate_limit: 1000
   rate_limit_burst: 2000
   max_request_size: 10485760 # 10MB
+prevention:
+  enabled: true
+  enable_block_ip: true
+  enable_process_kill: true
+  whitelist:
+    ips:
+      - "127.0.0.1"
+      - "::1"
+    processes:
+      - "systemd"
+      - "sshd"
+      - "dockerd"
+  rollback_timeout: "30s"
+  log_actions: true
+  dry_run: false # Set to true to log but not execute actions
+  alert_threshold: 0.9 # Minimum confidence score for prevention actions

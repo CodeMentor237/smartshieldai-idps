@@ -48,10 +48,13 @@ type Config struct {
 			MinAccuracy      float64 `yaml:"min_accuracy"`
 			MaxFalsePositive float64 `yaml:"max_false_positive"`
 			MaxFalseNegative float64 `yaml:"max_false_negative"`
+			DriftThreshold   float64 `yaml:"drift_threshold"`
 			UpdateInterval   string  `yaml:"update_interval"`
 			RetrainInterval  string  `yaml:"retrain_interval"`
 		} `yaml:"ml"`
 	} `yaml:"detection"`
+
+	Prevention PreventionConfig `yaml:"prevention"`
 
 	Security struct {
 		RateLimit       int `yaml:"rate_limit"`
@@ -65,6 +68,19 @@ type Config struct {
 	ElasticsearchUser   string
 	ElasticsearchPass   string
 	ElasticsearchIndex  string
+}
+
+// PreventionConfig represents the prevention configuration
+type PreventionConfig struct {
+	Enabled             bool          `yaml:"enabled"`
+	EnableBlockIP       bool          `yaml:"enable_block_ip"`
+	EnableProcessKill   bool          `yaml:"enable_process_kill"`
+	WhitelistedIPs     []string      `yaml:"whitelist.ips"`
+	WhitelistedProcs   []string      `yaml:"whitelist.processes"`
+	RollbackTimeout    string        `yaml:"rollback_timeout"`
+	LogActions         bool          `yaml:"log_actions"`
+	DryRun            bool          `yaml:"dry_run"`
+	AlertThreshold    float64       `yaml:"alert_threshold"`
 }
 
 // LoadConfig loads the configuration from a file
